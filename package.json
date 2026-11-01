@@ -1,0 +1,14 @@
+{
+  "name": "fitness-dream-biometric-bridge",
+  "version": "1.0.0",
+  "description": "Syncs attendance and membership status between ESSL F22 (ZKTeco) devices and Supabase",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5",
+    "zkteco-js": "^1.7.2"
+  }
+}
