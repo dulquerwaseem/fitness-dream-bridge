@@ -37,6 +37,14 @@ function log(message) {
   fs.appendFile(logFile, line + '\n', () => {});
 }
 
+// zkteco-js throws ZkError objects ({ err, command, ip }, possibly nested)
+// rather than real Errors, so err.message is undefined. Unwrap to the cause.
+function errMsg(err) {
+  let e = err;
+  while (e && !e.message && e.err) e = e.err;
+  return (e && (e.message || e.code)) || String(err);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -66,7 +74,7 @@ async function syncAttendance(device, zk) {
     const info = await zk.getInfo();
     if (info && info.logCounts === 0) return;
   } catch (err) {
-    log(`[${device.label}] getInfo failed, trying attendance download anyway: ${err.message}`);
+    log(`[${device.label}] getInfo failed, trying attendance download anyway: ${errMsg(err)}`);
   }
 
   const { data: logs } = await zk.getAttendances();
@@ -102,7 +110,7 @@ async function syncAttendance(device, zk) {
   try {
     await zk.clearAttendanceLog();
   } catch (err) {
-    log(`[${device.label}] could not clear on-device attendance log: ${err.message}`);
+    log(`[${device.label}] could not clear on-device attendance log: ${errMsg(err)}`);
   }
 }
 
@@ -145,7 +153,7 @@ async function syncMembership(device, zk) {
       try {
         await zk.deleteUser(member.biometric_uid);
       } catch (err) {
-        log(`[${device.label}] deleteUser(${member.biometric_uid}) failed: ${err.message}`);
+        log(`[${device.label}] deleteUser(${member.biometric_uid}) failed: ${errMsg(err)}`);
         continue; // leave enrollment row as-is, retry next cycle
       }
       await setEnrollment(member.id, device.ip, false);
@@ -170,7 +178,7 @@ async function syncMembership(device, zk) {
     try {
       await zk.setUser(uid, String(uid), member.full_name.slice(0, 24), '', 0, 0);
     } catch (err) {
-      log(`[${device.label}] setUser(${uid}) failed: ${err.message}`);
+      log(`[${device.label}] setUser(${uid}) failed: ${errMsg(err)}`);
       continue;
     }
     await setEnrollment(member.id, device.ip, true);
@@ -189,16 +197,48 @@ async function syncMembership(device, zk) {
 
 async function runCycle() {
   for (const device of DEVICES) {
+    // Attendance and membership use separate connections: a timed-out
+    // attendance download can leave the device session unusable, and it must
+    // never block enrollments/removals.
+    let attendanceFailed = false;
     try {
-      await withDevice(device, async (zk) => {
-        await syncAttendance(device, zk);
-        await syncMembership(device, zk);
-      });
+      await withDevice(device, (zk) => syncAttendance(device, zk));
     } catch (err) {
-      log(`[${device.label}] cycle failed: ${err.message}`);
+      attendanceFailed = true;
+      log(`[${device.label}] attendance download failed, continuing with membership sync: ${errMsg(err)}`);
+    }
+
+    if (attendanceFailed) await sleep(2000); // give the device a moment to drop the stale session
+
+    try {
+      await withDevice(device, (zk) => syncMembership(device, zk));
+    } catch (err) {
+      log(`[${device.label}] membership sync failed: ${errMsg(err)}`);
     }
   }
 }
+
+// zkteco-js bug (src/ztcp.js readWithBuffer): on a timeout it rejects, then
+// keeps going and calls reply.subarray() on null inside an async Promise
+// executor. That TypeError becomes a stray unhandled rejection that would kill
+// the process even though the caller already caught the timeout. Swallow only
+// that known case; anything else still exits so start-bridge.bat restarts us.
+function isKnownZktecoStrayError(err) {
+  return (
+    err instanceof TypeError &&
+    /reading 'subarray'/.test(err.message) &&
+    /zkteco-js[\\/]src[\\/]ztcp\.js/.test(err.stack || '')
+  );
+}
+
+process.on('unhandledRejection', (err) => {
+  if (isKnownZktecoStrayError(err)) {
+    log(`Ignored stray zkteco-js error after a device timeout: ${errMsg(err)}`);
+    return;
+  }
+  log(`Unhandled rejection: ${(err && err.stack) || err}`);
+  process.exit(1);
+});
 
 async function main() {
   log(`Bridge starting. Polling every ${POLL_INTERVAL_MINUTES} minute(s).`);
