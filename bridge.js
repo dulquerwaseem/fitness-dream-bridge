@@ -5,7 +5,7 @@ const path = require('path');
 const Zkteco = require('zkteco-js');
 const { createClient } = require('@supabase/supabase-js');
 
-const required = ['DEVICE_1_IP', 'DEVICE_2_IP', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
+const required = ['DEVICE_1_IP', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
 for (const key of required) {
   if (!process.env[key]) {
     console.error(`Missing required env var ${key}. Copy .env.example to .env and fill it in.`);
@@ -20,8 +20,10 @@ const POLL_INTERVAL_MINUTES = Number(process.env.POLL_INTERVAL_MINUTES || 5);
 
 const DEVICES = [
   { label: process.env.DEVICE_1_NAME || 'Device 1', ip: process.env.DEVICE_1_IP },
-  { label: process.env.DEVICE_2_NAME || 'Device 2', ip: process.env.DEVICE_2_IP },
-];
+  process.env.DEVICE_2_IP
+    ? { label: process.env.DEVICE_2_NAME || 'Device 2', ip: process.env.DEVICE_2_IP }
+    : null,
+].filter(Boolean);
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
@@ -57,6 +59,16 @@ async function withDevice(device, fn) {
 // clears the on-device log once the write is confirmed. Leaving the clear
 // out of the write's try/catch means a failed upload never loses punches.
 async function syncAttendance(device, zk) {
+  // The F22 never answers an attendance download when its log is empty, and
+  // zkteco-js then crashes the process with an uncatchable TypeError. Check the
+  // log count first and skip the download when there is nothing to fetch.
+  try {
+    const info = await zk.getInfo();
+    if (info && info.logCounts === 0) return;
+  } catch (err) {
+    log(`[${device.label}] getInfo failed, trying attendance download anyway: ${err.message}`);
+  }
+
   const { data: logs } = await zk.getAttendances();
   if (!logs || logs.length === 0) return;
 
@@ -146,7 +158,8 @@ async function syncMembership(device, zk) {
     .select('id, full_name, biometric_uid')
     .is('deleted_at', null)
     .gte('expiry_date', today)
-    .not('biometric_uid', 'is', null);
+    .not('biometric_uid', 'is', null)
+    .eq('biometric_active', true);
   if (activeError) throw activeError;
 
   for (const member of active) {
@@ -161,6 +174,15 @@ async function syncMembership(device, zk) {
       continue;
     }
     await setEnrollment(member.id, device.ip, true);
+
+    const { error: activeUpdateError } = await supabase
+      .from('members')
+      .update({ biometric_active: true })
+      .eq('id', member.id);
+    if (activeUpdateError) {
+      log(`[${device.label}] could not set biometric_active for member ${member.id}: ${activeUpdateError.message}`);
+    }
+
     log(`[${device.label}] enrolled member ${member.id} (uid ${uid})`);
   }
 }
