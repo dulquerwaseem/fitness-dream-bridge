@@ -13,6 +13,14 @@ async function main() {
   console.log(`Connecting to ${IP}:${PORT}...`);
   await zk.createSocket();
   try {
+    // The F22 never answers a users download when it has no users, and
+    // zkteco-js then crashes the process. Check the count first.
+    const info = await zk.getInfo();
+    if (info && info.userCounts === 0) {
+      console.log(`Total users on ${IP}: 0`);
+      return;
+    }
+
     const result = await zk.getUsers();
     const users = (result && result.data) || [];
     if (result && result.err) console.warn('Device reported an error:', result.err);

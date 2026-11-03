@@ -141,14 +141,16 @@ async function syncMembership(device, zk) {
   if (enrolledIds.size > 0) {
     const { data: candidates, error } = await supabase
       .from('members')
-      .select('id, biometric_uid, expiry_date, deleted_at')
+      .select('id, biometric_uid, expiry_date, deleted_at, biometric_active')
       .in('id', [...enrolledIds]);
     if (error) throw error;
 
     for (const member of candidates) {
       const expired = member.expiry_date < today;
       const removed = member.deleted_at != null;
-      if (!(expired || removed) || !member.biometric_uid) continue;
+      // Strict false: null means "never set", not "turned off" in the app.
+      const deactivated = member.biometric_active === false;
+      if (!(expired || removed || deactivated) || !member.biometric_uid) continue;
 
       try {
         await zk.deleteUser(member.biometric_uid);
