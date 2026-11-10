@@ -134,6 +134,17 @@ async function setEnrollment(memberId, deviceIp, enrolled) {
   if (error) throw error;
 }
 
+// The bridge has no heartbeat, so the webapp infers "device online" from how
+// recently synced_at moved. Bump it for every row on this device after a
+// successful contact. Logs instead of throwing so it never blocks a sync.
+async function touchDeviceEnrollments(device) {
+  const { error } = await supabase
+    .from('biometric_device_enrollment')
+    .update({ synced_at: new Date().toISOString() })
+    .eq('device_ip', device.ip);
+  if (error) log(`[${device.label}] could not update synced_at: ${error.message}`);
+}
+
 async function syncMembership(device, zk) {
   const today = new Date().toISOString().slice(0, 10);
   const enrolledIds = await getEnrolledMemberIds(device.ip);
@@ -205,6 +216,7 @@ async function runCycle() {
     let attendanceFailed = false;
     try {
       await withDevice(device, (zk) => syncAttendance(device, zk));
+      await touchDeviceEnrollments(device);
     } catch (err) {
       attendanceFailed = true;
       log(`[${device.label}] attendance download failed, continuing with membership sync: ${errMsg(err)}`);
@@ -214,6 +226,7 @@ async function runCycle() {
 
     try {
       await withDevice(device, (zk) => syncMembership(device, zk));
+      await touchDeviceEnrollments(device);
     } catch (err) {
       log(`[${device.label}] membership sync failed: ${errMsg(err)}`);
     }
